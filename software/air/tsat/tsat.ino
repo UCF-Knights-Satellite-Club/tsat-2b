@@ -1,13 +1,12 @@
-#include <RFM69.h>
-#include <RFM69_ATC.h>
 #include "Adafruit_BMP3XX.h"
 #include "Adafruit_MMA8451.h"
+#include <RFM69.h>
+#include <RFM69_ATC.h>
 
 // -----[ Network Config ]-----
-#define NODEID 99
-#define GATEWAYID 1
+#define NODEID 0
 #define NETWORKID 100
-#define FREQUENCY RF69_433MHZ
+#define FREQUENCY RF69_915MHZ
 #define ENCRYPTKEY "TSAT-2B/25"
 
 // Auto Transmission Control
@@ -20,6 +19,8 @@
 
 // -----[ Constants ]-----
 
+#define TEST_MODE
+
 #define PACKET_PING 1
 #define PACKET_TELEMETRY 2
 
@@ -31,17 +32,17 @@ typedef struct {
   unsigned int index;
   unsigned long time; // milliseconds
   double temperature; // celsius
-  double pressure; // pa
-  double altitude; // m
-  float accel[3]; // m/s/s
+  double pressure;    // pa
+  double altitude;    // m
+  float accel[3];     // m/s/s
 } DataPoint;
 
 // -----[ Statics ]-----
 
 #ifdef ENABLE_ATC
-  RFM69_ATC radio;
+RFM69_ATC radio;
 #else
-  RFM69 radio;
+RFM69 radio;
 #endif
 Adafruit_BMP3XX bmp;
 Adafruit_MMA8451 mma = Adafruit_MMA8451();
@@ -64,8 +65,8 @@ typedef struct {
   // representation is very weird (undefined?) across platorms.
   // This might not be entirely necessary, but it's good to make sure.
   // Telemetry doesn't need to be 100% accurate anyways.
-  uint32_t altitude; 
-  uint32_t pressure; 
+  uint32_t altitude;
+  uint32_t pressure;
   uint32_t temperature;
   uint32_t acceleration_magnitude;
   uint32_t velocity;
@@ -79,8 +80,8 @@ typedef struct {
 
 // Metadata for each packet
 typedef struct {
-  uint8_t satellite_id;
-  uint8_t message_type;
+  uint16_t satellite_id;
+  uint16_t message_type;
 } PacketMeta;
 
 typedef struct {
@@ -100,8 +101,8 @@ static TaskHandle_t communication_tx_handle;
 //       the packet is written to.
 // Returns:
 //    - whether receiving the packet was successful.
-bool receive_packet(Packet* packet) {
-  if (!radio.receiveDone())  {
+bool receive_packet(Packet *packet) {
+  if (!radio.receiveDone()) {
     return false;
   }
   if (radio.DATALEN < sizeof(PacketMeta)) {
@@ -140,58 +141,59 @@ bool receive_packet(Packet* packet) {
 // Converts a datapoint into a telemetry packet.
 // Parameters:
 //   - data: A pointer to the datapoint we are converting.
-//   - (optional) previous: A pointer to the previous datapoint. 
+//   - (optional) previous: A pointer to the previous datapoint.
 // Returns:
 //    - A telemetry packet which can be sent.
-Packet datapoint_to_telemetry(DataPoint* data, DataPoint* previous) {
+Packet datapoint_to_telemetry(DataPoint *data, DataPoint *previous) {
   // Magnitude of 3d vector (search it up)
   double accel_mag = sqrt(sq(data->accel[0]) + sq(data->accel[1]) + sq(data->accel[2]));
 
   // Velocity = dx / dt
   // If we don't have a previous datapoint, default to 0
-  double velocity = previous ? (data->altitude - previous->altitude) / (data->time - previous->time) : 0;
+  double velocity =
+      previous ? (data->altitude - previous->altitude) / (data->time - previous->time) : 0;
 
   Packet packet;
-  packet.meta = { SATELLITE_ID, PACKET_TELEMETRY };
-  packet.data.telemetry = { 
-    data->index,
-    data->time,
-    // Floating-point to fixed-point 3 decimals. See above for rationale.
-    data->altitude * 1000,
-    data->pressure * 1000,
-    data->temperature * 1000,
-    accel_mag * 1000,
-    velocity * 1000,
+  packet.meta = {SATELLITE_ID, PACKET_TELEMETRY};
+  packet.data.telemetry = {
+      data->index,
+      data->time,
+      // Floating-point to fixed-point 3 decimals. See above for rationale.
+      data->altitude * 1000,
+      data->pressure * 1000,
+      data->temperature * 1000,
+      accel_mag * 1000,
+      velocity * 1000,
   };
 
   return packet;
 }
 
 // Handles receiving a ping packet.
-void handle_ping_packet(Packet* packet) {
+void handle_ping_packet(Packet *packet, uint16_t sender) {
   // Send back the same packet that received.
-  radio.send(GATEWAYID, packet, sizeof(PacketMeta) + sizeof(PacketPing));
+  radio.send(sender, packet, sizeof(PacketMeta) + sizeof(PacketPing));
 }
 
 // The main loop for receiving packets.
-void communication_rx(void* _) {
+void communication_rx(void *_) {
   while (1) {
     Packet packet;
     bool success = receive_packet(&packet);
 
     switch (packet.meta.message_type) {
       case PACKET_PING:
-        handle_ping_packet(&packet);
+        handle_ping_packet(&packet, radio.SENDERID);
         break;
-      // We never should receive a telemetry packet.
-      // If we do then just ignore it.
+        // We never should receive a telemetry packet.
+        // If we do then just ignore it.
     }
 
     vTaskDelay(200 / portTICK_PERIOD_MS);
   }
 }
 
-void communication_tx(void* _) {
+void communication_tx(void *_) {
   bool previous = false;
   while (1) {
     DataPoint dp;
@@ -200,7 +202,8 @@ void communication_tx(void* _) {
       Packet packet = datapoint_to_telemetry(&dp, previous ? &previous_datapoint : NULL);
       previous = true;
       previous_datapoint = dp;
-      radio.send(GATEWAYID, &packet, sizeof(PacketMeta) + sizeof(PacketTelemetry));
+      // Node 255 broadcasts to every node on network
+      radio.send(255, &packet, sizeof(PacketMeta) + sizeof(PacketTelemetry));
     }
 
     vTaskDelay(1000 / portTICK_PERIOD_MS);
@@ -209,7 +212,7 @@ void communication_tx(void* _) {
 
 // -----[ Sensor Data ]-----
 
-bool capture_data(DataPoint* dp) {
+bool capture_data(DataPoint *dp) {
   if (!bmp.performReading()) {
     return false;
   }
@@ -234,8 +237,14 @@ void setup() {
   radio.setHighPower(); // needed for RFM69HCW
   radio.encrypt(ENCRYPTKEY);
 
+  #ifdef TEST_MODE
+    Serial.begin(115200);
+    return;
+  #endif
+
   if (!bmp.begin_I2C()) {
-    while(1);
+    while (1)
+      ;
   };
 
   // Set up oversampling and filter initialization
@@ -245,33 +254,59 @@ void setup() {
   bmp.setOutputDataRate(BMP3_ODR_50_HZ);
 
   if (!mma.begin()) {
-    while(1);
+    while (1)
+      ;
   };
   mma.setRange(MMA8451_RANGE_2_G);
 
-  // put your setup code here, to run once:
-  xTaskCreatePinnedToCore(
-    communication_rx,
-    "communication_rx",
-    3000,
-    NULL,
-    10,
-    &communication_rx_handle,
-    0
-  );
+  xTaskCreatePinnedToCore(communication_rx, "communication_rx", 3000, NULL, 10,
+                          &communication_rx_handle, 0);
 
-  xTaskCreatePinnedToCore(
-    communication_tx,
-    "communication_tx",
-    3000,
-    NULL,
-    5,
-    &communication_tx_handle,
-    0
-  );
+  xTaskCreatePinnedToCore(communication_tx, "communication_tx", 3000, NULL, 5,
+                          &communication_tx_handle, 0);
 }
 
+unsigned int counter = 0;
+bool previous = false;
 void loop() {
-  // put your main code here, to run repeatedly:
+  #ifdef TEST_MODE
+    if (radio.receiveDone()) {
+      for (byte i = 0; i < radio.DATALEN; i++)
+        Serial.print(radio.DATA[i]);
+      Serial.println();
 
+      if (radio.ACKRequested())
+      {
+        radio.sendACK();
+        Serial.print(" - ACK sent");
+      }
+    }
+    Serial.println("Creating fake datapoint,");
+    DataPoint dp;
+    dp.index = counter++;
+    dp.time = millis();
+    dp.pressure = sin(millis() / 1000.0);
+    dp.altitude = dp.pressure * 5 + 3;
+    dp.temperature = cos(millis() / 1000.0);
+    for (int i=0; i<3; i++) {
+      dp.accel[i] = random(-100, 100) / 100.0;
+    }
+    Serial.println("Creating telemetry packet.");
+    Packet packet = datapoint_to_telemetry(&dp, previous ? &previous_datapoint : NULL);
+
+    // Node 255 broadcasts to every node on network
+    if (radio.canSend()) {
+      Serial.println("Sending packet!");
+      radio.send(255, &packet, sizeof(PacketMeta) + sizeof(PacketTelemetry));
+    } else {
+      Serial.println("Unable to send packet.");
+    }
+
+    previous_datapoint = dp;
+    previous = true;
+
+    Serial.println("Sleeping.");
+    delay(1000);
+  #endif
+  // put your main code here, to run repeatedly:
 }

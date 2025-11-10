@@ -5,6 +5,7 @@ import typing
 import serial
 import argparse
 import numpy as np
+import matplotlib
 import matplotlib.pyplot as plt
 import time
 import matplotlib.animation as animation
@@ -41,14 +42,21 @@ class Packet:
     meta: PacketMeta
     data: TelemetryPacket | PingPacket
 
-MAGIC = [ 84, 83, 65, 84 ]
+@dataclass
+class PlotInfo:
+    fancy_name: str
+    label: str
+    data_name: str
+    row: int
+    col: int
+
 telemetry_data: list[TelemetryPacket] = []
 
 def deserialize_packet(raw: bytes) -> typing.Optional[Packet]:
     # see https://docs.python.org/3/library/struct.html
     # esp32 is little endian
     # <2B = little endian, 2 bytes
-    id, ty = struct.unpack("<2B", raw[:2])
+    id, ty = struct.unpack("<2H", raw[:4])
     try:
         ty = PacketType(ty)
     except ValueError:
@@ -60,10 +68,10 @@ def deserialize_packet(raw: bytes) -> typing.Optional[Packet]:
     match meta.packet_type:
         case PacketType.PING:
             # <I = little endian, 1 32bit uint
-            data = PingPacket(struct.unpack("<I", raw[2:]))
+            data = PingPacket(struct.unpack("<I", raw[4:]))
         case PacketType.TELEMETRY:
             # <7I = little endian, 7 32bit uints
-            raw = list(struct.unpack("<7I"))
+            raw = list(struct.unpack("<7I", raw[4:]))
             # 1-6 are fixed-point floats with 3 decimals
             # Keep in mind range ends are exclusive!!
             for i in range(1, 7):
@@ -85,46 +93,63 @@ def serialize_packet(packet: Packet) -> bytes:
     return b
 
 fig, axs = plt.subplots(2, 3)
-def create_plot(fancy_name: str, label: str, data_name: str, row: int, col: int):
-    ax = axs[row, col]
+plot_info = [
+    PlotInfo("Temperature", "°C", "temperature", 0, 0),
+    PlotInfo("Pressure", "pa", "pressure", 0, 1),
+    PlotInfo("Altitude", "m", "altitude", 0, 2),
+    PlotInfo("Acceleration", "m/s/s", "acceleration_magnitude", 1, 0),
+    PlotInfo("Ascent Velocity", "m/s", "velocity", 1, 1)
+]
+line_data = []
+lines = []
+for (i, plot) in enumerate(plot_info):
+    ax = axs[plot.row, plot.col]
     line = ax.plot([], [])
     ax.grid()
     ax.set_xlim(0, 1)
     ax.set_ylim(-100, 100)
-    ax.set_title(fancy_name)
-    ax.set_ylabel(label)
-    xdata, ydata = [], []
+    ax.set_title(plot.fancy_name)
+    ax.set_ylabel(plot.label)
+    line_data.append([[], []])
+    lines.append(line)
 
-    def run(data):
-        t, y = data
-        if t is None:
-            return
-        xdata.append(t)
-        ydata.append(y)
-        xmin, xmax = ax.get_xlim()
+def run(data):
+    tl, yl = data
+    if len(tl) == 0:
+        return [line[0] for line in lines]
+    
+    for (i, plot) in enumerate(plot_info):
+        for (t, y) in zip(tl, yl):
+            line_data[i][0].append(t)
+            line_data[i][1].append(getattr(y, plot.data_name))
 
-        if t >= xmax:
-            ax.set_xlim(xmin, xmax*2)
-            ax.figure.canvas.draw()
-        line[0].set_data(xdata, ydata)
+            ax = axs[plot.row, plot.col]
 
-    def data_gen():
-        i = 0
-        while True:
-            if len(telemetry_data) > i:
-                packet = telemetry_data[i]
-                i += 1
-                yield packet.frame_count, getattr(packet, data_name)
-            else:
-                yield None, None
+            xmin, xmax = ax.get_xlim()
 
-    return animation.FuncAnimation(fig, run, data_gen, save_count=100)
+            if t >= xmax:
+                ax.set_xlim(t-100, t)
 
-temp_anim = create_plot("Temperature", "°C", "temperature", 0, 0)
-pressure_anim = create_plot("Pressure", "pa", "pressure", 0, 1)
-alt_anim = create_plot("Altitude", "m", "altitude", 0, 2)
-accel_anim = create_plot("Acceleration", "m/s/s", "acceleration_magnitude", 1, 0)
-vel_anim = create_plot("Ascent Velocity", "m/s", "velocity", 1, 1)
+        lines[i][0].set_data(line_data[i][0], line_data[i][1])
+
+    return [line[0] for line in lines]
+
+def data_gen():
+    i = 0
+    while True:
+        tl = []
+        yl = []
+        while len(telemetry_data) > i:
+            packet = telemetry_data[i]
+            i += 1
+            tl.append(packet.frame_count)
+            yl.append(packet)
+        yield tl, yl
+
+# Need blit=True otherwise performance is very bad
+# We use one FuncAnimation to increase performance further
+anim = animation.FuncAnimation(fig, run, data_gen, save_count=100, blit=True, interval=1/60)
+
 img_ax = axs[1, 2]
 with open("ksc.png", "rb") as f:
     image = plt.imread(f)
@@ -136,32 +161,37 @@ parser = argparse.ArgumentParser(
 )
 parser.add_argument("reciever", help="The serial port in which the reciever is connected to the computer.\nUsually COM1 on Windows and /dev/ttyUSB0 or /dev/ttyS0 on Linux/Mac")
 args = parser.parse_args()
-#ser = serial.Serial(args.reciever)
+ser = serial.Serial(args.reciever, baudrate=115200)
 
 running = True
 def run():
-    i=0
+    #i=0
     while running:
-        time.sleep(1)
-        telemetry_data.append(TelemetryPacket(
-            i,
-            i * 0.1,
-            0,
-            i * 10,
-            40*np.sin(i),
-            0,
-            0
-        ))
-        i += 1
+        #telemetry_data.append(TelemetryPacket(
+        #    i,
+        #    i * 0.1,
+        #    0,
+        #    i * 10,
+        #    40*np.sin(i),
+        #    0,
+        #    0
+        #))
+        #i += 1
         # Simple code to read every packet.
         # Eventually we need to do
         # reading and writing simultaneously
-        #raw = ser.readline()
-        #line = bytes([int(i) for i in raw.split(' ')])
-        #packet = deserialize_packet(line)
-        #print("Got packet!", packet)
-        #if packet.meta.packet_type == PacketType.TELEMETRY:
-        #    telemetry_data.append(packet.data)
+        raw = ser.readline()
+        try:
+            raw = [int(i) for i in raw.decode().strip().split(' ')]
+            print("Raw:", raw)
+            line = bytes(raw)
+            packet = deserialize_packet(line)
+            print("Packet:", packet)
+            if packet.meta.packet_type == PacketType.TELEMETRY:
+                telemetry_data.append(packet.data)
+            print()
+        except:
+            continue
 
 t = threading.Thread(target=run)
 t.start()
