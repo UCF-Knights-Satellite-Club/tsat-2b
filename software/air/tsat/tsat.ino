@@ -7,8 +7,11 @@
 #define NODEID 0
 #define NETWORKID 100
 #define FREQUENCY RF69_915MHZ
-#define ENCRYPTKEY "TSAT-2B/25"
+#define ENCRYPTKEY "TSAT-2B/Bubbles-"
 
+#define RFM69_CS 5
+#define RFM69_RST 14
+#define RFM69_IRQ 13
 // Auto Transmission Control
 // Saves power
 #define ENABLE_ATC
@@ -20,11 +23,16 @@
 // -----[ Constants ]-----
 
 #define TEST_MODE
+#define TEST_MODE_USE_MMA
 
 #define PACKET_PING 1
 #define PACKET_TELEMETRY 2
 
 #define SATELLITE_ID 1
+
+// -----[ Misc ]-----
+
+#define LED_BUILTIN 2
 
 // -----[ Types ]-----
 
@@ -40,9 +48,9 @@ typedef struct {
 // -----[ Statics ]-----
 
 #ifdef ENABLE_ATC
-RFM69_ATC radio;
+RFM69_ATC radio(RFM69_CS, RFM69_IRQ);
 #else
-RFM69 radio;
+RFM69 radio(RFM69_CS, RFM69_IRQ);
 #endif
 Adafruit_BMP3XX bmp;
 Adafruit_MMA8451 mma = Adafruit_MMA8451();
@@ -69,7 +77,7 @@ typedef struct {
   uint32_t pressure;
   uint32_t temperature;
   uint32_t acceleration_magnitude;
-  uint32_t velocity;
+  int32_t velocity;
 } PacketTelemetry;
 
 // Ping packet
@@ -151,7 +159,7 @@ Packet datapoint_to_telemetry(DataPoint *data, DataPoint *previous) {
   // Velocity = dx / dt
   // If we don't have a previous datapoint, default to 0
   double velocity =
-      previous ? (data->altitude - previous->altitude) / (data->time - previous->time) : 0;
+      previous ? 1000 * (data->altitude - previous->altitude) / (data->time - previous->time) : 0;
 
   Packet packet;
   packet.meta = {SATELLITE_ID, PACKET_TELEMETRY};
@@ -197,14 +205,12 @@ void communication_tx(void *_) {
   bool previous = false;
   while (1) {
     DataPoint dp;
-    bool success = capture_data(&dp);
-    if (success) {
-      Packet packet = datapoint_to_telemetry(&dp, previous ? &previous_datapoint : NULL);
-      previous = true;
-      previous_datapoint = dp;
-      // Node 255 broadcasts to every node on network
-      radio.send(255, &packet, sizeof(PacketMeta) + sizeof(PacketTelemetry));
-    }
+    capture_data(&dp);
+    Packet packet = datapoint_to_telemetry(&dp, previous ? &previous_datapoint : NULL);
+    previous = true;
+    previous_datapoint = dp;
+    // Broadcast to every node
+    radio.send(RF69_BROADCAST_ADDR, &packet, sizeof(PacketMeta) + sizeof(PacketTelemetry));
 
     vTaskDelay(1000 / portTICK_PERIOD_MS);
   }
@@ -212,52 +218,107 @@ void communication_tx(void *_) {
 
 // -----[ Sensor Data ]-----
 
-bool capture_data(DataPoint *dp) {
-  if (!bmp.performReading()) {
-    return false;
-  }
-  mma.read();
-
+bool mma_init = false;
+bool bmp_init = false;
+void capture_data(DataPoint *dp) {
   dp->index = datapoint_count++;
   dp->time = millis();
-  dp->temperature = bmp.temperature;
-  dp->pressure = bmp.pressure;
-  dp->altitude = bmp.readAltitude(SEALEVELPRESSURE_HPA);
-  dp->accel[0] = mma.x;
-  dp->accel[1] = mma.y;
-  dp->accel[2] = mma.z;
+  if (bmp_init && bmp.performReading()) {
+    dp->temperature = bmp.temperature;
+    dp->pressure = bmp.pressure;
+    dp->altitude = bmp.readAltitude(SEALEVELPRESSURE_HPA);
+  } else {
+    dp->temperature = 0;
+    dp->pressure = 0;
+    dp->altitude = 0;
+  }
+  if (mma_init) {
+    mma.read();
+    sensors_event_t event;
+    mma.getEvent(&event);
 
-  return true;
+    dp->accel[0] = event.acceleration.x;
+    dp->accel[1] = event.acceleration.y;
+    dp->accel[2] = event.acceleration.z;
+  } else {
+    dp->accel[0] = 0;
+    dp->accel[1] = 0;
+    dp->accel[2] = 0;
+  }
 }
 
 // -----[ Initialization ]-----
 
+// Separated out for simplicity
+void test_mode_init() {
+  Serial.begin(115200);
+
+  if (mma.begin()) {
+    Serial.println("MMA Initialized!");
+    mma_init = true;
+    mma.setRange(MMA8451_RANGE_2_G);
+  } else {
+    Serial.println("MMA failed to init!");
+  }
+
+  if (bmp.begin_I2C()) {
+    bmp_init = true;
+
+    // Set up oversampling and filter initialization
+    bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_8X);
+    bmp.setPressureOversampling(BMP3_OVERSAMPLING_4X);
+    bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
+    bmp.setOutputDataRate(BMP3_ODR_50_HZ);
+    Serial.println("BMP Initialized!");
+  } else {
+    Serial.println("BMP failed to init!");
+  }
+}
+
 void setup() {
-  radio.initialize(FREQUENCY, NODEID, NETWORKID);
+  // Reset the RFM69
+  // Needed for it to initialize properly!
+  pinMode(RFM69_RST, OUTPUT);
+  digitalWrite(RFM69_RST, LOW);
+  delay(10);
+  digitalWrite(RFM69_RST, HIGH);
+  delay(10);
+  digitalWrite(RFM69_RST, LOW);
+  delay(10);
+
+  if (!radio.initialize(FREQUENCY, NODEID, NETWORKID)) {
+    // Blink LED to signal error
+    pinMode(LED_BUILTIN, OUTPUT);
+    while (1) {
+      digitalWrite(LED_BUILTIN, HIGH);
+      delay(500);
+      digitalWrite(LED_BUILTIN, LOW);
+      delay(500);
+    }
+  }
   radio.setHighPower(); // needed for RFM69HCW
   radio.encrypt(ENCRYPTKEY);
 
   #ifdef TEST_MODE
-    Serial.begin(115200);
+    test_mode_init();
     return;
   #endif
 
-  if (!bmp.begin_I2C()) {
-    while (1)
-      ;
+  if (mma.begin()) {
+    mma_init = true;
+
+    mma.setRange(MMA8451_RANGE_2_G);
   };
 
-  // Set up oversampling and filter initialization
-  bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_8X);
-  bmp.setPressureOversampling(BMP3_OVERSAMPLING_4X);
-  bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
-  bmp.setOutputDataRate(BMP3_ODR_50_HZ);
+  if (bmp.begin_I2C()) {
+    bmp_init = true;
 
-  if (!mma.begin()) {
-    while (1)
-      ;
+    // Set up oversampling and filter initialization
+    bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_8X);
+    bmp.setPressureOversampling(BMP3_OVERSAMPLING_4X);
+    bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
+    bmp.setOutputDataRate(BMP3_ODR_50_HZ);
   };
-  mma.setRange(MMA8451_RANGE_2_G);
 
   xTaskCreatePinnedToCore(communication_rx, "communication_rx", 3000, NULL, 10,
                           &communication_rx_handle, 0);
@@ -278,35 +339,23 @@ void loop() {
       if (radio.ACKRequested())
       {
         radio.sendACK();
-        Serial.print(" - ACK sent");
+        delay(10);
+        Serial.println(" - ACK sent");
       }
     }
     Serial.println("Creating fake datapoint,");
     DataPoint dp;
-    dp.index = counter++;
-    dp.time = millis();
-    dp.pressure = sin(millis() / 1000.0);
-    dp.altitude = dp.pressure * 5 + 3;
-    dp.temperature = cos(millis() / 1000.0);
-    for (int i=0; i<3; i++) {
-      dp.accel[i] = random(-100, 100) / 100.0;
-    }
-    Serial.println("Creating telemetry packet.");
+    capture_data(&dp);
     Packet packet = datapoint_to_telemetry(&dp, previous ? &previous_datapoint : NULL);
 
-    // Node 255 broadcasts to every node on network
-    if (radio.canSend()) {
-      Serial.println("Sending packet!");
-      radio.send(255, &packet, sizeof(PacketMeta) + sizeof(PacketTelemetry));
-    } else {
-      Serial.println("Unable to send packet.");
-    }
+    // Broadcast to every node
+    radio.send(RF69_BROADCAST_ADDR, &packet, sizeof(PacketMeta) + sizeof(PacketTelemetry), false);
 
     previous_datapoint = dp;
     previous = true;
 
     Serial.println("Sleeping.");
-    delay(1000);
+    delay(250);
   #endif
   // put your main code here, to run repeatedly:
 }

@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import time
 import matplotlib.animation as animation
 import threading
+import bisect
 
 class PacketType(enum.Enum):
     PING = 1
@@ -70,8 +71,8 @@ def deserialize_packet(raw: bytes) -> typing.Optional[Packet]:
             # <I = little endian, 1 32bit uint
             data = PingPacket(struct.unpack("<I", raw[4:]))
         case PacketType.TELEMETRY:
-            # <7I = little endian, 7 32bit uints
-            raw = list(struct.unpack("<7I", raw[4:]))
+            # <6Ii = little endian, 6 32bit uints, 1 32bit int
+            raw = list(struct.unpack("<6Ii", raw[4:]))
             # 1-6 are fixed-point floats with 3 decimals
             # Keep in mind range ends are exclusive!!
             for i in range(1, 7):
@@ -97,7 +98,7 @@ plot_info = [
     PlotInfo("Temperature", "°C", "temperature", 0, 0),
     PlotInfo("Pressure", "pa", "pressure", 0, 1),
     PlotInfo("Altitude", "m", "altitude", 0, 2),
-    PlotInfo("Acceleration", "m/s/s", "acceleration_magnitude", 1, 0),
+    PlotInfo("Acceleration Magnitude", "m/s/s", "acceleration_magnitude", 1, 0),
     PlotInfo("Ascent Velocity", "m/s", "velocity", 1, 1)
 ]
 line_data = []
@@ -113,6 +114,7 @@ for (i, plot) in enumerate(plot_info):
     line_data.append([[], []])
     lines.append(line)
 
+st = time.time()
 def run(data):
     tl, yl = data
     if len(tl) == 0:
@@ -126,9 +128,19 @@ def run(data):
             ax = axs[plot.row, plot.col]
 
             xmin, xmax = ax.get_xlim()
+            new_ymin, new_ymax = min(line_data[i][1]), max(line_data[i][1])
+            ymin, ymax = ax.get_ylim()
 
+            if new_ymin != ymin or new_ymax != ymax:
+                ax.set_ylim(new_ymin, new_ymax)
+            
             if t >= xmax:
                 ax.set_xlim(t-100, t)
+
+            global st
+            if time.time() - st > 5:
+                st = time.time()
+                ax.figure.canvas.draw()
 
         lines[i][0].set_data(line_data[i][0], line_data[i][1])
 
@@ -182,9 +194,9 @@ def run():
         # reading and writing simultaneously
         raw = ser.readline()
         try:
-            raw = [int(i) for i in raw.decode().strip().split(' ')]
+            raw = raw.decode().strip()
             print("Raw:", raw)
-            line = bytes(raw)
+            line = bytes([int(i) for i in raw.split(' ')])
             packet = deserialize_packet(line)
             print("Packet:", packet)
             if packet.meta.packet_type == PacketType.TELEMETRY:
