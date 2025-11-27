@@ -23,9 +23,34 @@ class PingPacket:
 
 # Ideally this would be a 1 to 1 representation
 # of the C code, but to make things simpler the
-# fixed-point numbers are made floating during deserialization
+# fixed-point numbers are made floating-point during deserialization.
+# Thus, this essentially represents a struct of fully deseriaized telemetry data
 @dataclass
 class TelemetryPacket:
+    frame_count: int
+    time: int
+    altitude: int
+    pressure: int
+    temperature: int
+    acceleration_magnitude: int
+    velocity: int
+
+# Contains general information about the packet
+@dataclass
+class PacketHeader:
+    satellite_id: int
+    packet_type: PacketType
+
+# The full packet that is sent/recieved
+@dataclass
+class Packet:
+    header: PacketHeader
+    data: TelemetryPacket | PingPacket
+
+# A fully deserialized telemetry packet, with all fixed-point
+# numbers conveted to floating-point
+@dataclass
+class DataPoint:
     frame_count: int
     time: float
     altitude: float
@@ -34,22 +59,10 @@ class TelemetryPacket:
     acceleration_magnitude: float
     velocity: float
 
-@dataclass
-class PacketMeta:
-    satellite_id: int
-    packet_type: PacketType
-
-@dataclass
-class Packet:
-    meta: PacketMeta
-    data: TelemetryPacket | PingPacket
-
-telemetry_data: list[TelemetryPacket] = []
-
 def deserialize_packet(raw: bytes) -> typing.Optional[Packet]:
     # see https://docs.python.org/3/library/struct.html
     # esp32 is little endian
-    # <2B = little endian, 2 bytes
+    # <2H = little endian, 2 16bit uints
     id, ty = struct.unpack("<2H", raw[:4])
     try:
         ty = PacketType(ty)
@@ -57,37 +70,46 @@ def deserialize_packet(raw: bytes) -> typing.Optional[Packet]:
         print(f"Unknown packet: {ty}")
         return None
     
-    meta = PacketMeta(id, ty)
+    header = PacketHeader(id, ty)
     data = None
-    match meta.packet_type:
+    match header.packet_type:
         case PacketType.PING:
-            # <I = little endian, 1 32bit uint
+            # <I = little put them on the graphendian, 1 32bit uint
             data = PingPacket(struct.unpack("<I", raw[4:]))
         case PacketType.TELEMETRY:
             # <6Ii = little endian, 6 32bit uints, 1 32bit int
             raw = list(struct.unpack("<6Ii", raw[4:]))
-            # 1-6 are fixed-point floats with 3 decimals
-            # Keep in mind range ends are exclusive!!
-            for i in range(1, 7):
-                raw[i] /= 1000
-
             data = TelemetryPacket(*raw)
     
-    return Packet(meta, data)
+    return Packet(header, data)
 
 def serialize_packet(packet: Packet) -> bytes:
     # <2B = little endian, 2 bytes
-    b = struct.pack("<2B", packet.meta.satellite_id, packet.meta.packet_type)
+    b = struct.pack("<2B", packet.header.satellite_id, packet.header.packet_type)
 
-    match packet.meta.packet_type:
+    match packet.header.packet_type:
         case PacketType.PING:
             b += struct.pack("<I", packet.data.counter)
         # We never send telemetry packets so we dont need the code for it
 
     return b
 
+def telemetry_packet_to_datapoint(packet: TelemetryPacket) -> DataPoint:
+    return DataPoint(
+        packet.frame_count,
+        # These are all fixed-point floats with 3 decimals
+        packet.time / 1000,
+        packet.altitude / 1000,
+        packet.pressure / 1000,
+        packet.temperature / 1000,
+        packet.acceleration_magnitude / 1000,
+        packet.velocity / 1000
+    )
+
 # --------------------[ Plotting ]--------------------
 
+# Contains the information we need to create a graph.
+# Helps us create a lot of graphs easily.
 @dataclass
 class PlotInfo:
     fancy_name: str
@@ -100,19 +122,22 @@ plot_info = [
     PlotInfo("Temperature", "°C", "temperature", 1, 1),
     PlotInfo("Pressure", "pa", "pressure", 1, 2),
     PlotInfo("Altitude", "m", "altitude", 1, 3),
-    PlotInfo("Acceleration Magnitude", "m/s/s", "acceleration_magnitude", 2, 1),
+    PlotInfo("Acceleration Magnitude", "g", "acceleration_magnitude", 2, 1),
     PlotInfo("Ascent Velocity", "m/s", "velocity", 2, 2)
 ]
 
+datapoints: list[DataPoint] = []
+
 def create_graph(plot: PlotInfo) -> dbc.Col:
     return dbc.Col(dcc.Graph(id=plot.data_name, figure=dict(
+        # data is a list that contains multiple lines, but we only have 1 line per graph
         data = [dict(x = [], y=[])],
         layout = dict(
             xaxis = dict(range = [-1, 1]),
             yaxis = dict(range = [-1, 1], title=dict(text = plot.label)),
             title = dict(text = plot.fancy_name)
         ),
-    )), lg=4, md=12)
+    )), lg=4, md=12) # There are 12 columns for the total layout, so 4 == 1/3 width and 12 == full width
 
 app = Dash("KSC TSAT-2B Live Telemetry Monitor", external_stylesheets=[dbc.themes.BOOTSTRAP])
 app.layout = [
@@ -144,8 +169,8 @@ def update_plots(_, processed_packets):
         # This is the additional graph data we append
         new_data_x, new_data_y = [], []
         # Look through all the packets we haven't processed yet
-        for idx in range(processed_packets, len(telemetry_data)):
-            packet = telemetry_data[idx]
+        for idx in range(processed_packets, len(datapoints)):
+            packet = datapoints[idx]
             new_data_x.append(packet.frame_count)
             new_data_y.append(getattr(packet, plot.data_name))
 
@@ -154,7 +179,7 @@ def update_plots(_, processed_packets):
         # to reduce code bloat
         set_props(plot.data_name, dict(extendData=[dict(x=[new_data_x], y=[new_data_y])]))
 
-    return len(telemetry_data)
+    return len(datapoints)
 
 # --------------------[ Main Program ]--------------------
 
@@ -170,10 +195,11 @@ args = parser.parse_args()
 running = True
 def run():
     if args.test_graphs:
+        # Create random test data to ensure the graphs work correctly
         i = 0
 
         while running:
-            telemetry_data.append(TelemetryPacket(
+            datapoints.append(TelemetryPacket(
                 i,
                 i * 1000,
                 0,
@@ -187,6 +213,7 @@ def run():
             time.sleep(1)
 
     elif args.live:
+        # Take in live data from a reciever and graph the telemetry packets
         ser = serial.Serial(args.live, baudrate=115200)
 
         while running:
@@ -197,18 +224,21 @@ def run():
                 line = bytes([int(i) for i in raw.split(' ')])
                 packet = deserialize_packet(line)
                 print("Packet:", packet)
-                if packet.meta.packet_type == PacketType.TELEMETRY:
-                    telemetry_data.append(packet.data)
+                if packet.header.packet_type == PacketType.TELEMETRY:
+                    datapoints.append(
+                        telemetry_packet_to_datapoint(packet.data)
+                    )
                 print()
             except:
                 continue
 
     elif args.from_file:
+        # Read in all the datapoints and graph them
         lines = open(args.from_file, 'r').readlines()
         for line in lines:
             data = [float(n) for n in line.strip().split(',')]
-            packet = TelemetryPacket(*data)
-            telemetry_data.append(packet)
+            packet = DataPoint(*data)
+            datapoints.append(packet)
 
         
 t = threading.Thread(target=run)

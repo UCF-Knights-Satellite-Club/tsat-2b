@@ -61,8 +61,8 @@ DataPoint previous_datapoint;
 // -----[ Networking ]-----
 // Packets are sent as raw bytes.
 // While this makes things a little more complicated on the receiving end,
-// It means we need basically no code for serialization/deserialization
-// It also makes it very lightweight (not that it matters)
+// It means we need basically no code for serialization/deserialization on air
+// It also makes it very lightweight (not that it matters too much though)
 
 // Telemetry Packet
 typedef struct {
@@ -86,14 +86,14 @@ typedef struct {
   uint32_t counter;
 } PacketPing;
 
-// Metadata for each packet
+// General data for each packet
 typedef struct {
   uint16_t satellite_id;
   uint16_t message_type;
-} PacketMeta;
+} PacketHeader;
 
 typedef struct {
-  PacketMeta meta;
+  PacketHeader header;
   union {
     PacketTelemetry telemetry;
     PacketPing ping;
@@ -113,17 +113,17 @@ bool receive_packet(Packet *packet) {
   if (!radio.receiveDone()) {
     return false;
   }
-  if (radio.DATALEN < sizeof(PacketMeta)) {
+  if (radio.DATALEN < sizeof(PacketHeader)) {
     return false;
   }
 
   // Read in packet header
-  memcpy(packet, radio.DATA, sizeof(PacketMeta));
+  memcpy(packet, radio.DATA, sizeof(PacketHeader));
 
   // Depending on which packet type we received, we
   // have to read a different amount of bytes.
   int size;
-  switch (packet->meta.message_type) {
+  switch (packet->header.message_type) {
     case PACKET_PING:
       size = sizeof(PacketPing);
       break;
@@ -136,7 +136,7 @@ bool receive_packet(Packet *packet) {
   }
 
   // Check to make sure the rest of the data is there too
-  if (radio.DATALEN - sizeof(PacketMeta) < size) {
+  if (radio.DATALEN - sizeof(PacketHeader) < size) {
     return false;
   }
 
@@ -162,7 +162,7 @@ Packet datapoint_to_telemetry(DataPoint *data, DataPoint *previous) {
       previous ? 1000 * (data->altitude - previous->altitude) / (data->time - previous->time) : 0;
 
   Packet packet;
-  packet.meta = {SATELLITE_ID, PACKET_TELEMETRY};
+  packet.header = {SATELLITE_ID, PACKET_TELEMETRY};
   packet.data.telemetry = {
       data->index,
       data->time,
@@ -180,7 +180,7 @@ Packet datapoint_to_telemetry(DataPoint *data, DataPoint *previous) {
 // Handles receiving a ping packet.
 void handle_ping_packet(Packet *packet, uint16_t sender) {
   // Send back the same packet that received.
-  radio.send(sender, packet, sizeof(PacketMeta) + sizeof(PacketPing));
+  radio.send(sender, packet, sizeof(PacketHeader) + sizeof(PacketPing));
 }
 
 // The main loop for receiving packets.
@@ -189,7 +189,7 @@ void communication_rx(void *_) {
     Packet packet;
     bool success = receive_packet(&packet);
 
-    switch (packet.meta.message_type) {
+    switch (packet.header.message_type) {
       case PACKET_PING:
         handle_ping_packet(&packet, radio.SENDERID);
         break;
@@ -210,7 +210,7 @@ void communication_tx(void *_) {
     previous = true;
     previous_datapoint = dp;
     // Broadcast to every node
-    radio.send(RF69_BROADCAST_ADDR, &packet, sizeof(PacketMeta) + sizeof(PacketTelemetry));
+    radio.send(RF69_BROADCAST_ADDR, &packet, sizeof(PacketHeader) + sizeof(PacketTelemetry));
 
     vTaskDelay(1000 / portTICK_PERIOD_MS);
   }
@@ -218,12 +218,12 @@ void communication_tx(void *_) {
 
 // -----[ Sensor Data ]-----
 
-bool mma_init = false;
-bool bmp_init = false;
+bool mma_available = false;
+bool bmp_available = false;
 void capture_data(DataPoint *dp) {
   dp->index = datapoint_count++;
   dp->time = millis();
-  if (bmp_init && bmp.performReading()) {
+  if (bmp_available && bmp.performReading()) {
     dp->temperature = bmp.temperature;
     dp->pressure = bmp.pressure;
     dp->altitude = bmp.readAltitude(SEALEVELPRESSURE_HPA);
@@ -232,7 +232,7 @@ void capture_data(DataPoint *dp) {
     dp->pressure = 0;
     dp->altitude = 0;
   }
-  if (mma_init) {
+  if (mma_available) {
     mma.read();
     sensors_event_t event;
     mma.getEvent(&event);
@@ -255,14 +255,14 @@ void test_mode_init() {
 
   if (mma.begin()) {
     Serial.println("MMA Initialized!");
-    mma_init = true;
+    mma_available = true;
     mma.setRange(MMA8451_RANGE_2_G);
   } else {
     Serial.println("MMA failed to init!");
   }
 
   if (bmp.begin_I2C()) {
-    bmp_init = true;
+    bmp_available = true;
 
     // Set up oversampling and filter initialization
     bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_8X);
@@ -299,19 +299,19 @@ void setup() {
   radio.setHighPower(); // needed for RFM69HCW
   radio.encrypt(ENCRYPTKEY);
 
-  #ifdef TEST_MODE
-    test_mode_init();
-    return;
-  #endif
+#ifdef TEST_MODE
+  test_mode_init();
+  return;
+#endif
 
   if (mma.begin()) {
-    mma_init = true;
+    mma_available = true;
 
-    mma.setRange(MMA8451_RANGE_2_G);
+    mma.setRange(MMA8451_RANGE_4_G);
   };
 
   if (bmp.begin_I2C()) {
-    bmp_init = true;
+    bmp_available = true;
 
     // Set up oversampling and filter initialization
     bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_8X);
@@ -330,32 +330,31 @@ void setup() {
 unsigned int counter = 0;
 bool previous = false;
 void loop() {
-  #ifdef TEST_MODE
-    if (radio.receiveDone()) {
-      for (byte i = 0; i < radio.DATALEN; i++)
-        Serial.print(radio.DATA[i]);
-      Serial.println();
+#ifdef TEST_MODE
+  if (radio.receiveDone()) {
+    for (byte i = 0; i < radio.DATALEN; i++)
+      Serial.print(radio.DATA[i]);
+    Serial.println();
 
-      if (radio.ACKRequested())
-      {
-        radio.sendACK();
-        delay(10);
-        Serial.println(" - ACK sent");
-      }
+    if (radio.ACKRequested()) {
+      radio.sendACK();
+      delay(10);
+      Serial.println(" - ACK sent");
     }
-    Serial.println("Creating fake datapoint,");
-    DataPoint dp;
-    capture_data(&dp);
-    Packet packet = datapoint_to_telemetry(&dp, previous ? &previous_datapoint : NULL);
+  }
+  Serial.println("Creating fake datapoint,");
+  DataPoint dp;
+  capture_data(&dp);
+  Packet packet = datapoint_to_telemetry(&dp, previous ? &previous_datapoint : NULL);
 
-    // Broadcast to every node
-    radio.send(RF69_BROADCAST_ADDR, &packet, sizeof(PacketMeta) + sizeof(PacketTelemetry), false);
+  // Broadcast to every node
+  radio.send(RF69_BROADCAST_ADDR, &packet, sizeof(PacketHeader) + sizeof(PacketTelemetry), false);
 
-    previous_datapoint = dp;
-    previous = true;
+  previous_datapoint = dp;
+  previous = true;
 
-    Serial.println("Sleeping.");
-    delay(250);
-  #endif
+  Serial.println("Sleeping.");
+  delay(250);
+#endif
   // put your main code here, to run repeatedly:
 }
