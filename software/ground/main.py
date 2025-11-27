@@ -175,8 +175,7 @@ def update_plots(_, processed_packets):
             new_data_y.append(getattr(packet, plot.data_name))
 
         # Setting the extendData property appends the data to the graph
-        # We use set_props rather than callback Output to avoid having
-        # to reduce code bloat
+        # We use set_props rather than callback Output to avoid code bloat
         set_props(plot.data_name, dict(extendData=[dict(x=[new_data_x], y=[new_data_y])]))
 
     return len(datapoints)
