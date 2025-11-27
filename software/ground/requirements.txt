@@ -1,4 +1,4 @@
 pyserial
 numpy
-matplotlib
-pyqt6
+dash
+dash_bootstrap_components

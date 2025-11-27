@@ -5,12 +5,10 @@ import typing
 import serial
 import argparse
 import numpy as np
-import matplotlib
-import matplotlib.pyplot as plt
 import time
-import matplotlib.animation as animation
 import threading
-import bisect
+from dash import Dash, Output, html, dcc, Input, State, callback, set_props
+import dash_bootstrap_components as dbc
 
 class PacketType(enum.Enum):
     PING = 1
@@ -93,80 +91,65 @@ def serialize_packet(packet: Packet) -> bytes:
 
     return b
 
-fig, axs = plt.subplots(2, 3)
 plot_info = [
-    PlotInfo("Temperature", "°C", "temperature", 0, 0),
-    PlotInfo("Pressure", "pa", "pressure", 0, 1),
-    PlotInfo("Altitude", "m", "altitude", 0, 2),
-    PlotInfo("Acceleration Magnitude", "m/s/s", "acceleration_magnitude", 1, 0),
-    PlotInfo("Ascent Velocity", "m/s", "velocity", 1, 1)
+    PlotInfo("Temperature", "°C", "temperature", 1, 1),
+    PlotInfo("Pressure", "pa", "pressure", 1, 2),
+    PlotInfo("Altitude", "m", "altitude", 1, 3),
+    PlotInfo("Acceleration Magnitude", "m/s/s", "acceleration_magnitude", 2, 1),
+    PlotInfo("Ascent Velocity", "m/s", "velocity", 2, 2)
 ]
-line_data = []
-lines = []
-for (i, plot) in enumerate(plot_info):
-    ax = axs[plot.row, plot.col]
-    line = ax.plot([], [])
-    ax.grid()
-    ax.set_xlim(0, 1)
-    ax.set_ylim(-100, 100)
-    ax.set_title(plot.fancy_name)
-    ax.set_ylabel(plot.label)
-    line_data.append([[], []])
-    lines.append(line)
 
-st = time.time()
-def run(data):
-    tl, yl = data
-    if len(tl) == 0:
-        return [line[0] for line in lines]
-    
-    for (i, plot) in enumerate(plot_info):
-        for (t, y) in zip(tl, yl):
-            line_data[i][0].append(t)
-            line_data[i][1].append(getattr(y, plot.data_name))
+def create_graph(plot: PlotInfo) -> dbc.Col:
+    return dbc.Col(dcc.Graph(id=plot.data_name, figure=dict(
+        data = [dict(x = [], y=[])],
+        layout = dict(
+            xaxis = dict(range = [-1, 1]),
+            yaxis = dict(range = [-1, 1], title=dict(text = plot.label)),
+            title = dict(text = plot.fancy_name)
+        ),
+    )), lg=4, md=12)
 
-            ax = axs[plot.row, plot.col]
+app = Dash("KSC TSAT-2B Live Telemetry Monitor", external_stylesheets=[dbc.themes.BOOTSTRAP])
+app.layout = [
+    dcc.Interval(id="interval", interval=1000), # The interval to update the graphs when we recieve packets
+    dcc.Store(id="processed-packets", data=0), # How many packets we have processed so far
 
-            xmin, xmax = ax.get_xlim()
-            new_ymin, new_ymax = min(line_data[i][1]), max(line_data[i][1])
-            ymin, ymax = ax.get_ylim()
+    dbc.Container([
+        dbc.Row([
+            create_graph(plot_info[0]),
+            create_graph(plot_info[1]),
+            create_graph(plot_info[2]),
+        ]),
+        dbc.Row([
+            create_graph(plot_info[3]),
+            create_graph(plot_info[4]),
+            dbc.Col(html.Img(src=app.get_asset_url("ksc.png")), lg=4, md=12, style=dict(textAlign="center")),
+        ])
+    ], fluid=True),
+]
 
-            if new_ymin != ymin or new_ymax != ymax:
-                ax.set_ylim(new_ymin, new_ymax)
-            
-            if t >= xmax:
-                ax.set_xlim(t-100, t)
+@callback(
+   Output("processed-packets", "data"),
+   Input("interval", "n_intervals"),
+   State("processed-packets", "data"),
+)
+def update_plots(_, processed_packets):
+    # Take in new telemetry data
+    for plot in plot_info:
+        # This is the additional graph data we append
+        new_data_x, new_data_y = [], []
+        # Look through all the packets we haven't processed yet
+        for idx in range(processed_packets, len(telemetry_data)):
+            packet = telemetry_data[idx]
+            new_data_x.append(packet.frame_count)
+            new_data_y.append(getattr(packet, plot.data_name))
 
-            global st
-            if time.time() - st > 5:
-                st = time.time()
-                ax.figure.canvas.draw()
+        # Setting the extendData property appends the data to the graph
+        # We use set_props rather than callback Output to avoid having
+        # to reduce code bloat
+        set_props(plot.data_name, dict(extendData=[dict(x=[new_data_x], y=[new_data_y])]))
 
-        lines[i][0].set_data(line_data[i][0], line_data[i][1])
-
-    return [line[0] for line in lines]
-
-def data_gen():
-    i = 0
-    while True:
-        tl = []
-        yl = []
-        while len(telemetry_data) > i:
-            packet = telemetry_data[i]
-            i += 1
-            tl.append(packet.frame_count)
-            yl.append(packet)
-        yield tl, yl
-
-# Need blit=True otherwise performance is very bad
-# We use one FuncAnimation to increase performance further
-anim = animation.FuncAnimation(fig, run, data_gen, save_count=100, blit=True, interval=1/60)
-
-img_ax = axs[1, 2]
-with open("ksc.png", "rb") as f:
-    image = plt.imread(f)
-img_ax.imshow(image)
-img_ax.axis("off")
+    return len(telemetry_data)
 
 parser = argparse.ArgumentParser(
     description = "TSAT-2B Communications"
@@ -208,6 +191,6 @@ def run():
 t = threading.Thread(target=run)
 t.start()
 
-plt.show(block=True)
+app.run()
 running = False
 t.join()
