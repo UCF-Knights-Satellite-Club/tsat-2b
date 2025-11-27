@@ -9,6 +9,9 @@ import time
 import threading
 from dash import Dash, Output, html, dcc, Input, State, callback, set_props
 import dash_bootstrap_components as dbc
+import random
+
+# --------------------[ Packets ]--------------------
 
 class PacketType(enum.Enum):
     PING = 1
@@ -40,14 +43,6 @@ class PacketMeta:
 class Packet:
     meta: PacketMeta
     data: TelemetryPacket | PingPacket
-
-@dataclass
-class PlotInfo:
-    fancy_name: str
-    label: str
-    data_name: str
-    row: int
-    col: int
 
 telemetry_data: list[TelemetryPacket] = []
 
@@ -90,6 +85,16 @@ def serialize_packet(packet: Packet) -> bytes:
         # We never send telemetry packets so we dont need the code for it
 
     return b
+
+# --------------------[ Plotting ]--------------------
+
+@dataclass
+class PlotInfo:
+    fancy_name: str
+    label: str
+    data_name: str
+    row: int
+    col: int
 
 plot_info = [
     PlotInfo("Temperature", "°C", "temperature", 1, 1),
@@ -151,46 +156,65 @@ def update_plots(_, processed_packets):
 
     return len(telemetry_data)
 
+# --------------------[ Main Program ]--------------------
+
 parser = argparse.ArgumentParser(
-    description = "TSAT-2B Communications"
+    description = "TSAT-2B Telemetry Monitor"
 )
-parser.add_argument("reciever", help="The serial port in which the reciever is connected to the computer.\nUsually COM1 on Windows and /dev/ttyUSB0 or /dev/ttyS0 on Linux/Mac")
+action_group = parser.add_mutually_exclusive_group(required=True)
+action_group.add_argument("--live", metavar="port", help="Recieves live telemetry from a serial ground reciever. Port is usually COMX on Windows and /dev/ttyUSBX or /dev/ttySX on Linux/Mac where X is a number.")
+action_group.add_argument("--from-file", metavar="file", help="Reads telemetry data from a file and displays it.")
+action_group.add_argument("--test-graphs", action="store_true", help="Debugging utility. Creates random data for graphs to test the display.")
 args = parser.parse_args()
-ser = serial.Serial(args.reciever, baudrate=115200)
 
 running = True
 def run():
-    #i=0
-    while running:
-        #telemetry_data.append(TelemetryPacket(
-        #    i,
-        #    i * 0.1,
-        #    0,
-        #    i * 10,
-        #    40*np.sin(i),
-        #    0,
-        #    0
-        #))
-        #i += 1
-        # Simple code to read every packet.
-        # Eventually we need to do
-        # reading and writing simultaneously
-        raw = ser.readline()
-        try:
-            raw = raw.decode().strip()
-            print("Raw:", raw)
-            line = bytes([int(i) for i in raw.split(' ')])
-            packet = deserialize_packet(line)
-            print("Packet:", packet)
-            if packet.meta.packet_type == PacketType.TELEMETRY:
-                telemetry_data.append(packet.data)
-            print()
-        except:
-            continue
+    if args.test_graphs:
+        i = 0
 
+        while running:
+            telemetry_data.append(TelemetryPacket(
+                i,
+                i * 1000,
+                0,
+                i * 10,
+                40*np.sin(i),
+                5 + random.random() * 10,
+                0
+            ))
+            i += 1
+
+            time.sleep(1)
+
+    elif args.live:
+        ser = serial.Serial(args.live, baudrate=115200)
+
+        while running:
+            raw = ser.readline()
+            try:
+                raw = raw.decode().strip()
+                print("Raw:", raw)
+                line = bytes([int(i) for i in raw.split(' ')])
+                packet = deserialize_packet(line)
+                print("Packet:", packet)
+                if packet.meta.packet_type == PacketType.TELEMETRY:
+                    telemetry_data.append(packet.data)
+                print()
+            except:
+                continue
+
+    elif args.from_file:
+        lines = open(args.from_file, 'r').readlines()
+        for line in lines:
+            data = [float(n) for n in line.strip().split(',')]
+            packet = TelemetryPacket(*data)
+            telemetry_data.append(packet)
+
+        
 t = threading.Thread(target=run)
 t.start()
 
 app.run()
+# On CTRL-C, app.run() terminates, so lets clean up
 running = False
 t.join()
