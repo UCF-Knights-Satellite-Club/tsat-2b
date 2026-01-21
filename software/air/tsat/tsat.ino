@@ -7,10 +7,10 @@
 #include <SD.h>
 // -----[ SD Config ]-----
 
-#define SCK //grab thees from pinout later
-#define MISO 
-#define MOSI 
-#define SD_CS 
+#define SCK 14  // Stolen from TSAT-0 might be different now
+#define MISO 12
+#define MOSI 13
+#define SD_CS 15
 // -----[ Network Config ]-----
 #define NODEID 0
 #define NETWORKID 100
@@ -35,9 +35,9 @@
 #define SATELLITE_ID 1
 
 
-File internalStorage;
+File flightLog;
 bool cardFail; //if sd card doesn't activate works like tsat0
-char[20] fileName;
+char file_name[20];
 int flightNum;
 //move these anywhere if they don't belong here
 // -----[ Types ]-----
@@ -189,6 +189,10 @@ void datapoint_to_csv(File file, Datapoint *dp){
     Serial.println("File not found!");
     return;
   }
+  if(dp == NULL){
+    Serial.println("Null Datapoint");
+    return;
+  }
 
   file.print(dp->index);
   file.print(";");
@@ -304,6 +308,9 @@ void setup() {
   xTaskCreatePinnedToCore(communication_tx, "communication_tx", 3000, NULL, 5,
                           &communication_tx_handle, 0);
   // SD v
+
+  cardfail = false;
+
   if(!SD.begin()) {
     Serial.println("SD Card Initializatoin Failed");
     cardFail = true;
@@ -311,22 +318,24 @@ void setup() {
     Serial.println("Please insert SD Card");
     cardFail = true;
   }
-  cardFail = false;
 
-  if(!cardFail){ // if it works
+  if(!cardFail){ // increments the name by 1 every flight
     flightNum = 0;
     do {
-      sprintf(base_dir, "/tsatlog%d", flightNum);
+      sprintf(file_name, "/tsatlog%d.csv", flightNum);
       i++;
-    } while (SD.exists(base_dir));
-    SD.mkdir(base_dir);
-    if(internalStorage){
-      internalStorage.println("Index;Time (ms);Temperature (C);Pressure (pa);Altitude (m); Accel x (m/s^2); Accel y (m/s^2); Accel z (m/s^2);"); //prints headers for the file
+    } while (SD.exists(file_name));
+    
+    flightLog = SD.open(file_name, FILE_WRITE);
+
+    if(flightLog){
+      flightLog.println("Index;Time (ms);Temperature (C);Pressure (pa);Altitude (m); Accel x (m/s^2); Accel y (m/s^2); Accel z (m/s^2);"); //prints headers for the file
       //prints the headers to the file
     }else{
       Serial.println("File falied to open");
     }
   }
+
 }
 
 unsigned int counter = 0;
