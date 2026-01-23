@@ -195,21 +195,20 @@ void datapoint_to_csv(File file, Datapoint *dp){
   }
 
   file.print(dp->index);
-  file.print(";");
+  file.print(",");
   file.print(dp->time);
-  file.print(";");
+  file.print(",");
   file.print(dp->temperature);
-  file.print(";");
+  file.print(",");
   file.print(dp->pressure);
-  file.print(";");
+  file.print(",");
   file.print(dp->altitude);
-  file.print(";");
+  file.print(",");
   file.print(dp->accel[0]); //accel x
-  file.print(";");
+  file.print(",");
   file.print(dp->accel[1]); // accel y
-  file.print(";");
-  file.print(dp->accel[2]); //accel z
-  file.println();
+  file.print(",");
+  file.println(dp->accel[2]); //accel z
 }
 // Handles receiving a ping packet.
 void handle_ping_packet(Packet *packet, uint16_t sender) {
@@ -329,7 +328,7 @@ void setup() {
     flightLog = SD.open(file_name, FILE_WRITE);
 
     if(flightLog){
-      flightLog.println("Index;Time (ms);Temperature (C);Pressure (pa);Altitude (m); Accel x (m/s^2); Accel y (m/s^2); Accel z (m/s^2);"); //prints headers for the file
+      flightLog.println("Index,Time (ms),Temperature (C),Pressure (pa),Altitude (m),Accel x (m/s^2),Accel y (m/s^2),Accel z (m/s^2)"); //prints headers for the file
       //prints the headers to the file
     }else{
       Serial.println("File falied to open");
