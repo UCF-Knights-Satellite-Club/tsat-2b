@@ -1,18 +1,15 @@
 # TSAT-2B
-Software for Knights Satellite Club Tethered-Sat 2B
+TSAT-2B is a tethered satellite designed for live data collection and ground visualization. The system consists of an air sensor payload, a ground station, and software for telemetry decoding and visualization.
 
-## Telemetry Pipeline
+## System Overview
+- Air sensor platform 
+- Ground-side receiver and data bridge
+- Live telemetry visualization software
 
-### Air
-The satellite is launched in to the air, and reads data from sensors. This includes:
-- Pressure
-- Temperature
-- Acceleration
+## Repository Structure
+- `hardware/` – PCB designs and electrical schematics
+- `software/` – Firmware, ground station software, and telemetry tools
 
-From this data, we can use pressure to calculate altitude, and altitude + time to calculate ascent velocity. This data is then sent over the RFM communications module to the ground.
-
-### Ground Pipe
-This is a program ran on an ESP32 (but can be adapted to any other microcontroller) on the ground. This simply reads in packets from the RFM communications module, and relays it over serial to a laptop, where the ground program will be ran.
-
-### Ground
-This receives data over serial, and deserializes it. It then uses matplotlib to display this data as a collection of graphs.
+## Documentation
+- [Software README](software/README.md)
+- [Hardware README](hardware/README.md)
