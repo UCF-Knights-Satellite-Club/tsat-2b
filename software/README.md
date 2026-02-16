@@ -19,7 +19,7 @@ The firmware runs on the microcontroller mounted on the satellite.
 
 * Sensor sampling (pressure, temperature, acceleration, altitude)
 * Fixed telemetry encoding for bandwidth efficiency
-* Framing and transmitting telemetry packets over serial
+* Framing and transmitting telemetry packets over the communications module.
 * Periodic ping packet support for link testing
 
 ### Packet Design
